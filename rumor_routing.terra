@@ -1,0 +1,356 @@
+// Authors: Rayanne Souza, Bruno Castro 
+// Last modification: 30 Jun. 2019
+
+#include "/home/terra/TerraNG/terra/TerraNet.defs"
+
+#define AGENTE_TLL  4
+#define QUERY_TLL   6
+
+#define HELLO_MSG 	1
+#define AGENT_MSG 	2
+#define QUERY_MSG	3
+
+#define SIMUL_STEP_IN_SEC	2
+
+#define TMIN	500
+#define TMAX 	530
+#define DEF_QUERY_MIN	400
+#define DEF_QUERY_MAX 430
+
+#define EVENT_TABLE_SIZE 2
+#define EVENT_LOW_TEMP 0
+#define EVENT_HIGH_TEMP 1
+
+// Usar 0 para desabilitar
+#define MOCK_EVENT_NODE_ID 0
+#define MOCK_EVENT_DELAY 2
+// Usar 0 para desabilitar
+#define MOCK_QUERY_NODE_ID 0
+#define MOCK_QUERY_DELAY 2
+
+#define QUERY_BACKING 1
+
+pktype stdMsg from radioMsg with
+	var short numHops;
+
+	// variaveis do agent
+	var short[2] eventDistance;
+	var ushort[2] eventDirection;
+
+	// variaveis da busca
+	var ushort eventId; // identificador do evento
+	var ushort reqNodeId; // identificador do noh requisitor
+	var ushort isBacking;
+end 
+
+var stdMsg hello;
+var stdMsg rec, sendMsg;
+
+
+// myNode
+var ushort myId = getNodeId();
+var ushort nborSize = 0;
+var ushort[16] neighbors;
+var ushort queryNborId = 0;
+
+var ushort myTemperature;
+
+// myEventTable
+var short[2] eventDistance;
+var ushort[2] eventDirection;
+// inicializa a table de eventos com distancia invalida
+loop i, EVENT_TABLE_SIZE do
+	eventDistance[i] = -1;
+end	
+
+
+// mensagens
+hello.type= HELLO_MSG;
+hello.target = BROADCAST;
+hello.source = myId;
+
+// Parte 1: Identificacao dos vizinhos
+var ushort helloDelay = 80 + random()%20; //((myId/10 -1)*2 + myId%10);
+par/or do
+	await (helloDelay)ms;
+	
+	// envia mensagem de broadcast para determinar os vizinhos
+	emit SEND(hello);
+	
+	// DEBUG: Enviou Hello
+	emit LED0(ON);
+	loop do
+		rec = await RECEIVE;
+		if rec.type == HELLO_MSG then		
+			neighbors[nborSize] = rec.source;
+			inc nborSize;			
+				
+			// DEBUG: Recebeu pelo menos um Hello
+			emit LED1(ON);
+		end	
+	end
+with	
+	await (SIMUL_STEP_IN_SEC)s;
+end
+ 
+
+// Parte 2: Programa principal
+if nborSize == 0 then
+	// DEBUG: Sem vizinho, nao ira participar
+	emit LED1(ON);
+	emit LED2(ON);
+else
+
+	// DEBUG: Apto a iniciar
+	emit LEDS(OFF);
+
+	// TRAIL: Recebe mensagem
+	par do 	
+		loop do
+			rec = await RECEIVE;
+			// DEBUG: Recebeu agente		
+			if rec.type == AGENT_MSG then
+				await (SIMUL_STEP_IN_SEC)s;
+				emit LED1(ON);
+			
+				// Ao receber, incrementamos o numHops
+				inc rec.numHops;
+
+				// Atualiza a tabela do no
+				loop i, EVENT_TABLE_SIZE do
+					// atualiza a tabela de eventos do noh
+					if (eventDistance[i] < 0) or (eventDistance[i] > rec.eventDistance[i]) then
+						eventDistance[i] = rec.eventDistance[i];
+						eventDirection[i] = rec.source;			
+					end
+				end 
+			
+				// Retransmissao, garantimos nao enviar para no que recebemos
+				if nborSize > 1 and rec.numHops < AGENTE_TLL then 			
+					
+					// atualiza o agente
+					loop eventId, EVENT_TABLE_SIZE do
+						if eventDistance[eventId] >= 0 then
+							rec.eventDistance[eventId] = eventDistance[eventId] + 1;
+							rec.eventDirection[eventId] = myId;
+						end
+					end
+					
+
+					var ushort neighborId = random() % nborSize;
+					// Garantimos nao enviar para no que recebemos
+					if neighbors[neighborId] == rec.source then 
+						neighborId = (neighborId + 1) % nborSize;
+					end
+
+					rec.target = neighbors[neighborId];
+					rec.source = myId;
+
+					// Repassa o agente
+					qPut(rec);
+				end 
+		
+			// DEBUG: Recebeu uma busca
+			else/if rec.type == QUERY_MSG then
+				await (SIMUL_STEP_IN_SEC)s;
+				emit LED2(ON);
+				
+				if rec.isBacking == QUERY_BACKING then
+
+					if rec.reqNodeId == myId then 
+						emit LED0(ON); // Achou o noh que requisitou a busca		
+					else
+						rec.source = myId;
+						rec.target = queryNborId;
+	
+						await (SIMUL_STEP_IN_SEC)s;
+						emit LED2(OFF);	
+						// Envia a busca retornando
+						qPut(rec);				
+					end
+				else
+					//CHEGOU AO DESTINO	
+					if eventDistance[rec.eventId] == 0 then
+				//		emit LED0(ON);
+				//		await (SIMUL_STEP_IN_SEC)s;
+				//		emit LED0(OFF);
+						
+						rec.isBacking = QUERY_BACKING;
+						rec.target = rec.source;						
+						rec.source = myId;
+						emit LED2(OFF);
+						qPut(rec); 			
+						// ToDo: O que fazer? Limpar tudo e comecar uma nova simluacao?
+					else
+
+						inc rec.numHops;
+					
+						// Retransmissao, garantimos nao enviar para no que recebemos
+						if nborSize > 1 and rec.numHops < QUERY_TLL then 	
+
+						
+							var ushort neighborId = -1;
+							// Conheco o evento
+							if 	eventDistance[rec.eventId] > 0 then
+								neighborId = eventDirection[rec.eventId];
+								
+								emit LED0(ON);
+								await (SIMUL_STEP_IN_SEC)s;
+								emit LED0(OFF);							
+						
+							else // Nao conheco sobre o evento
+
+								var short index = random() % nborSize;
+								// Garantimos nao enviar para no que recebemos
+								if neighbors[index] == rec.source then 
+									index = (index + 1) % nborSize;
+								end
+								neighborId = neighbors[index];
+							end
+					
+							queryNborId = rec.source;
+
+							// Altera o source e target
+							rec.source = myId;
+							rec.target = neighborId;
+							
+							// Envia a busca
+							qPut(rec);
+						end
+					end
+				end
+			else 
+				await 10ms;
+
+			end	
+		end
+
+	// TRAIL: Monitora temperatura
+	with
+		var ushort eventDetectedId = 0;
+		loop do
+			await (SIMUL_STEP_IN_SEC)s;
+
+			emit REQ_TEMP();
+			myTemperature = await TEMP;
+			
+			if myTemperature > TMAX then
+				eventDetectedId = EVENT_HIGH_TEMP;
+			else
+				eventDetectedId = 0;
+			end
+
+			if (eventDetectedId > 0 and (eventDistance[eventDetectedId] < 0)) then
+				
+				// DEBUG: Detectou um evento
+				emit LED0(ON);
+				eventDistance[eventDetectedId] = 0;
+		
+				// Cria um novo agente
+				var stdMsg agent;
+				agent.type = AGENT_MSG;
+				agent.source = myId;
+				agent.numHops = 0;
+				// inicializa a table de eventos do agente com distancia invalida
+				loop i, EVENT_TABLE_SIZE do
+					agent.eventDistance[i] = -1;
+				end	
+
+				agent.eventDistance[eventDetectedId] = eventDistance[eventDetectedId] + 1;
+				agent.target = neighbors[random() % nborSize];
+
+				// Envia o agente
+				qPut(agent);
+			end
+		end
+
+	// TRAIL: Gera um evento hard-coded
+	with
+		var ushort eventDetectedId = EVENT_HIGH_TEMP;
+		loop do
+			await (MOCK_EVENT_DELAY)s;
+			if ((myId == MOCK_EVENT_NODE_ID) and (eventDistance[eventDetectedId] < 0)) then
+				
+				// DEBUG: Detectou um evento
+				emit LED0(ON);
+				eventDistance[eventDetectedId] = 0;
+		
+				// Cria um novo agente
+				var stdMsg agent;
+				agent.type = AGENT_MSG;
+				agent.source = myId;
+				agent.numHops = 0;
+				// inicializa a table de eventos do agente com distancia invalida
+				loop i, EVENT_TABLE_SIZE do
+					agent.eventDistance[i] = -1;
+				end	
+
+				agent.eventDistance[eventDetectedId] = eventDistance[eventDetectedId] + 1;
+				agent.target = neighbors[random() % nborSize];
+
+				// Envia o agente
+				qPut(agent);
+			end
+		end
+
+	// TRAIL: Realiza busca (PHOTO > DEF_QUERY_MAX busca por envento de temperatura alta) 
+	with
+		var ushort eventDesiredId = 0;
+		// Variavel de controle para evitar emitir mais de uma busca
+		var ushort canQuery = TRUE;
+		var ushort photoValue = 0;
+
+		loop do
+			await (SIMUL_STEP_IN_SEC)s;
+			emit REQ_PHOTO();
+			photoValue = await PHOTO;
+			
+			if photoValue > DEF_QUERY_MAX then
+				eventDesiredId = EVENT_HIGH_TEMP;
+			else
+				eventDesiredId = 0;
+			end
+
+			if (eventDesiredId > 0 and canQuery == TRUE) then
+				// DEBUG: Detectou uma busca
+				emit LED2(ON);
+				canQuery = FALSE;
+
+				//CHEGOU AO DESTINO	
+				if eventDistance[eventDesiredId] == 0 then
+					// ToDo: O que fazer? Limpar tudo e comecar uma nova simluacao?
+				else
+					// Cria uma nova busca
+					var stdMsg query;
+					query.type = QUERY_MSG;
+					query.source = myId;
+					query.isBacking = 0;
+					query.numHops = 0;
+					
+					// variaveis da busca
+					query.eventId = eventDesiredId;
+					query.reqNodeId = myId;
+
+					query.target = neighbors[random() % nborSize];
+				
+					// Envia o agente
+					qPut(query);
+				end
+			end
+		end	
+
+	// TRAIL: Processa fila de mensagens
+	with 
+		loop do
+			if qSize() == 0 then
+				await Q_READY;
+			end	
+				qGet(sendMsg);
+				await 50ms;
+				emit SEND(sendMsg);
+				await SEND_DONE;
+		end
+	end 
+
+				
+end
